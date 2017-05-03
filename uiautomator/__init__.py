@@ -354,11 +354,12 @@ class AutomatorServer(object):
 
     handlers = NotFoundHandler()  # handler UI Not Found exception
 
-    def __init__(self, serial=None, local_port=None, device_port=None, adb_server_host=None, adb_server_port=None):
+    def __init__(self, serial=None, local_port=None, device_port=None, adb_server_host=None, adb_server_port=None, callback=None):
         self.uiautomator_process = None
         self.adb = Adb(serial=serial, adb_server_host=adb_server_host, adb_server_port=adb_server_port)
         self.device_port = int(device_port) if device_port else DEVICE_PORT
         self.__local_port = local_port
+        self.__callback = callback
 
     def get_forwarded_port(self):
         for s, lp, rp in self.adb.forward_list():
@@ -416,6 +417,8 @@ class AutomatorServer(object):
             _URLError = requests.exceptions.ConnectionError
 
             def wrapper(*args, **kwargs):
+                if restart and self.__callback: # only callback in the first call
+                    self.__callback(method, args, kwargs, is_before=True)
                 try:
                     return _method_obj(*args, **kwargs)
                 except (_URLError, socket.error, HTTPException) as e:
@@ -441,6 +444,8 @@ class AutomatorServer(object):
                             self.handlers['on'] = True
                         return _method_obj(*args, **kwargs)
                     raise
+                if self.__callback:
+                    self.__callback(method, args, kwargs, is_before=False)
             return wrapper
 
         return JsonRPCClient(self.rpc_uri,
@@ -584,12 +589,35 @@ class AutomatorDevice(object):
     }
 
     def __init__(self, serial=None, local_port=None, adb_server_host=None, adb_server_port=None):
+        self.__listeners = []
+
+        def _callback(method, args, kwargs, is_before):
+            for lis in self.__listeners:
+                lis(method, args, kwargs, is_before)
+
         self.server = AutomatorServer(
             serial=serial,
             local_port=local_port,
             adb_server_host=adb_server_host,
-            adb_server_port=adb_server_port
+            adb_server_port=adb_server_port,
+            callback=_callback,
         )
+
+    def register_callback(func):
+        """
+        Register callback
+
+        def callback(method, args, kwargs, is_before):
+            pass
+        """
+        self.__listeners.insert(0, func)
+
+    def unregister_callback(func):
+        """
+        Raises:
+            ValueError
+        """
+        self.__listeners.remove(func)
 
     def __call__(self, **kwargs):
         return AutomatorDeviceObject(self, Selector(**kwargs))
