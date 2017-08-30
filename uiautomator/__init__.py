@@ -18,26 +18,17 @@ import re
 import collections
 import xml.dom.minidom
 
-import requests
+import requests as requestslib
 
 from uiautomator.adb import Adb
 
 DEVICE_PORT = int(os.environ.get('UIAUTOMATOR_DEVICE_PORT', '9008'))
 LOCAL_PORT = int(os.environ.get('UIAUTOMATOR_LOCAL_PORT', '9008'))
 DEBUG = os.getenv('UIAUTOMATOR_DEBUG') == 'true'
+requests = requestslib.Session() # use HTTP Keep-Alive to speed request
 
 if 'localhost' not in os.environ.get('no_proxy', ''):
     os.environ['no_proxy'] = "localhost,%s" % os.environ.get('no_proxy', '')
-
-try:
-    import urllib2
-except ImportError:
-    import urllib.request as urllib2
-try:
-    from httplib import HTTPException
-except:
-    from http.client import HTTPException
-
 
 __author__ = "Xiaocong He, Codeskyblue"
 __all__ = ["Device", "rect", "point", "Selector", "JsonRPCError"]
@@ -185,9 +176,11 @@ class JsonRPCMethod(object):
             raise JsonRPCError(res.status_code, "HTTP Return code is not 200")
         jsonresult = res.json()
         if "error" in jsonresult and jsonresult["error"]:
+            error = jsonresult['error']
+            exception_type = error.get("data", {}).get("exceptionTypeName", 'Unknown')
             raise JsonRPCError(
-                jsonresult["error"]["code"],
-                "%s: %s" % (jsonresult["error"]["data"]["exceptionTypeName"], jsonresult["error"]["message"])
+                error["code"],
+                "%s: %s" % (exception_type, error["message"])
             )
         return jsonresult["result"]
         
@@ -346,7 +339,7 @@ class AutomatorServer(object):
 
     __apk_files = ["libs/app-uiautomator.apk", "libs/app-uiautomator-test.apk"]
     # Used for check if installed
-    __apk_vercode = 1
+    __apk_vercode = 2
     __apk_pkgname = 'com.github.uiautomator'
     __apk_pkgname_test = 'com.github.uiautomator.test'
 
@@ -400,8 +393,11 @@ class AutomatorServer(object):
     def install(self):
         base_dir = os.path.dirname(__file__)
         if self.need_install():
+            debug_print("install apks", self.__apk_files)
             for apk in self.__apk_files:
-                self.adb.cmd("install", "-rt", os.path.join(base_dir, apk)).wait()
+                self.adb.cmd("install", "-r", os.path.join(base_dir, apk)).wait()
+        else:
+            debug_print("already installed, skip")
 
     @property
     def jsonrpc(self):
@@ -413,12 +409,12 @@ class AutomatorServer(object):
 
         def _JsonRPCMethod(url, method, timeout, restart=True):
             _method_obj = JsonRPCMethod(url, method, timeout)
-            _URLError = requests.exceptions.ConnectionError
+            _URLError = requestslib.exceptions.ConnectionError
 
             def wrapper(*args, **kwargs):
                 try:
                     return _method_obj(*args, **kwargs)
-                except (_URLError, socket.error, HTTPException) as e:
+                except (_URLError, socket.error) as e:
                     if restart:
                         debug_print('restart')
                         server.stop()
@@ -462,21 +458,23 @@ class AutomatorServer(object):
     def ro_product(self):
         return self.adb.shell("getprop", "ro.build.product").strip()
 
+    def ro_manufacturer(self):
+        return self.adb.shell("getprop", "ro.product.manufacturer").strip().lower()
+
     def start(self, timeout=5):
         # 对应关系列表
         # http://www.cnblogs.com/lipeineng/archive/2017/01/06/6257859.html
         # Android 4.3 (sdk=18)
+        # Android 5.0 (sdk=21)
         debug_print('sdk version(instrument>=18)', self.sdk_version())
         debug_print('product', self.ro_product())
-        # FIXME(ssx): hot fix here
-        # instrument cannot run on Xiaomi
-        if self.sdk_version() >= 18 and \
-                self.ro_product() in [
-                    'iToolsVM', # iTools
-                    'Che1-CL20']:# 荣耀畅玩4X 
+        debug_print('manufacturer', self.ro_manufacturer())
+        if self.sdk_version() >= 18:
             self.install()
             cmd = ["shell", "am", "instrument", "-w",
-                   "com.github.uiautomator.test/android.support.test.runner.AndroidJUnitRunner"]
+                    "-e", "debug", "false", 
+                    "-e", "class", "com.github.uiautomator.stub.Stub",
+                    "com.github.uiautomator.test/android.support.test.runner.AndroidJUnitRunner"]
         else:
             files = self.push()
             cmd = list(itertools.chain(
@@ -555,14 +553,13 @@ class AutomatorServer(object):
     def screenshot(self, filename=None, scale=1.0, quality=100):
         if self.sdk_version() >= 18:
             try:
-                req = urllib2.Request("%s?scale=%f&quality=%f" % (self.screenshot_uri, scale, quality))
-                result = urllib2.urlopen(req, timeout=30)
+                r = requests.get(self.screenshot_uri, params=dict(scale=scale, quality=quality), timeout=30)
                 if filename:
                     with open(filename, 'wb') as f:
-                        f.write(result.read())
+                        f.write(r.content)
                         return filename
                 else:
-                    return result.read()
+                    return r.content
             except:
                 pass
         return None
@@ -650,17 +647,14 @@ class AutomatorDevice(object):
 
     def screenshot(self, filename, scale=1.0, quality=100):
         '''take screenshot.'''
-        result = self.server.screenshot(filename, scale, quality)
-        if result:
-            return result
+        for i in range(3):
+            result = self.server.screenshot(filename, scale, quality)
+            if result:
+                return result
+            self.info # try to launch uiautomator server
+            time.sleep(.1)
+        raise RuntimeError("screenshot failed")
 
-        device_file = self.server.jsonrpc.takeScreenshot("uiautomator-screenshot.png",
-                                                         scale, quality)
-        if not device_file:
-            return None
-        self.server.adb.run_cmd('pull', device_file, filename)
-        self.server.adb.run_cmd('shell', 'rm', device_file)
-        return filename
 
     def freeze_rotation(self, freeze=True):
         '''freeze or unfreeze the device rotation in current status.'''
