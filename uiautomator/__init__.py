@@ -18,14 +18,14 @@ import re
 import collections
 import xml.dom.minidom
 
-import requests as requestslib
+import requests
 
 from uiautomator.adb import Adb
 
 DEVICE_PORT = int(os.environ.get('UIAUTOMATOR_DEVICE_PORT', '9008'))
 LOCAL_PORT = int(os.environ.get('UIAUTOMATOR_LOCAL_PORT', '9008'))
 DEBUG = os.getenv('UIAUTOMATOR_DEBUG') == 'true'
-requests = requestslib.Session() # use HTTP Keep-Alive to speed request
+httpsession = requests.Session() # use HTTP Keep-Alive to speed request
 
 if 'localhost' not in os.environ.get('no_proxy', ''):
     os.environ['no_proxy'] = "localhost,%s" % os.environ.get('no_proxy', '')
@@ -168,7 +168,7 @@ class JsonRPCMethod(object):
         self.url, self.method, self.timeout = url, method, timeout
 
     def remote_call(self, data):
-        res = requests.post(self.url,
+        res = httpsession.post(self.url,
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
             data=json.dumps(data).encode('utf-8'))
@@ -344,6 +344,7 @@ class AutomatorServer(object):
     __apk_pkgname_test = 'com.github.uiautomator.test'
 
     __sdk = 0
+    __httpsession = requests.Session() # use a standalone session
 
     handlers = NotFoundHandler()  # handler UI Not Found exception
 
@@ -409,7 +410,7 @@ class AutomatorServer(object):
 
         def _JsonRPCMethod(url, method, timeout, restart=True):
             _method_obj = JsonRPCMethod(url, method, timeout)
-            _URLError = requestslib.exceptions.ConnectionError
+            _URLError = requests.exceptions.ConnectionError
 
             def wrapper(*args, **kwargs):
                 try:
@@ -424,19 +425,20 @@ class AutomatorServer(object):
                         raise
                 except JsonRPCError as e:
                     debug_print('rpc error', e.code, e.message)
-                    if e.code >= error_code_base - 1:
-                        server.stop()
-                        server.start(timeout=10)
-                        return _method_obj(*args, **kwargs)
-                    elif e.code == error_code_base - 2 and self.handlers['on']:  # Not Found
-                        try:
-                            self.handlers['on'] = False
-                            # any handler returns True will break the left handlers
-                            any(handler(self.handlers.get('device', None)) for handler in self.handlers['handlers'])
-                        finally:
-                            self.handlers['on'] = True
-                        return _method_obj(*args, **kwargs)
                     raise
+                    # if e.code >= error_code_base - 1:
+                    #     server.stop()
+                    #     server.start(timeout=10)
+                    #     return _method_obj(*args, **kwargs)
+                    # elif e.code == error_code_base - 2 and self.handlers['on']:  # Not Found
+                    #     try:
+                    #         self.handlers['on'] = False
+                    #         # any handler returns True will break the left handlers
+                    #         any(handler(self.handlers.get('device', None)) for handler in self.handlers['handlers'])
+                    #     finally:
+                    #         self.handlers['on'] = True
+                    #     return _method_obj(*args, **kwargs)
+                    # raise
             return wrapper
 
         return JsonRPCClient(self.rpc_uri,
@@ -551,18 +553,18 @@ class AutomatorServer(object):
         return "http://%s:%d/screenshot/0" % (self.adb.adb_server_host, self.local_port)
 
     def screenshot(self, filename=None, scale=1.0, quality=100):
-        if self.sdk_version() >= 18:
-            try:
-                r = requests.get(self.screenshot_uri, params=dict(scale=scale, quality=quality), timeout=30)
-                if filename:
-                    with open(filename, 'wb') as f:
-                        f.write(r.content)
-                        return filename
-                else:
-                    return r.content
-            except:
-                pass
-        return None
+        # since sdk version is always great 18, so no check here
+        # also can not use requests.Session, this will break /jsonrpc/0 requests
+        try:
+            r = self.__httpsession.get(self.screenshot_uri, params=dict(scale=scale, quality=quality), timeout=30)
+            if filename:
+                with open(filename, 'wb') as f:
+                    f.write(r.content)
+                    return filename
+            else:
+                return r.content
+        except:
+            pass
 
 
 class AutomatorDevice(object):
@@ -890,6 +892,14 @@ class AutomatorDevice(object):
 Device = AutomatorDevice
 
 
+def wait_exists(fn):
+    def _inner(self, *args, **kwargs):
+        self.wait_for_exists(self.timeout) # default
+        fn(self, *args, **kwargs)
+
+    return _inner
+
+
 class AutomatorDeviceUiObject(object):
     '''Represent a UiObject, on which user can perform actions, such as click, set text
     '''
@@ -900,6 +910,7 @@ class AutomatorDeviceUiObject(object):
         self.device = device
         self.jsonrpc = device.server.jsonrpc
         self.selector = selector
+        self.timeout = 3000
 
     @property
     def exists(self):
@@ -908,6 +919,7 @@ class AutomatorDeviceUiObject(object):
 
     def __getattr__(self, attr):
         '''alias of fields in info property.'''
+
         info = self.info
         if attr in info:
             return info[attr]
@@ -916,11 +928,16 @@ class AutomatorDeviceUiObject(object):
         else:
             raise AttributeError("%s attribute not found!" % attr)
 
+    def wait_for_exists(self, timeout=3000):
+        """ Wait until exists """
+        return self.jsonrpc.waitForExists(self.selector, timeout)
+
     @property
     def info(self):
         '''ui object info.'''
         return self.jsonrpc.objInfo(self.selector)
 
+    @wait_exists
     def set_text(self, text):
         '''set the text field.'''
         if text in [None, ""]:
@@ -928,29 +945,19 @@ class AutomatorDeviceUiObject(object):
         else:
             return self.jsonrpc.setText(self.selector, text)
 
+    @wait_exists
     def clear_text(self):
         '''clear text. alias for set_text(None).'''
         self.set_text(None)
 
-    @property
+    @wait_exists
     def click(self):
         '''
         click on the ui object.
         Usage:
         d(text="Clock").click()  # click on the center of the ui object
-        d(text="OK").click.wait(timeout=3000) # click and wait for the new window update
-        d(text="John").click.topleft() # click on the topleft of the ui object
-        d(text="John").click.bottomright() # click on the bottomright of the ui object
         '''
-        @wrapped_param_to_property(self, action=["tl", "topleft", "br", "bottomright", "wait"])
-        def _click(action=None, timeout=3000):
-            if action is None:
-                return self.jsonrpc.click(self.selector)
-            elif action in ["tl", "topleft", "br", "bottomright"]:
-                return self.jsonrpc.click(self.selector, action)
-            else:
-                return self.jsonrpc.clickAndWaitForNewWindow(self.selector, timeout)
-        return _click
+        return self.jsonrpc.click(self.selector)
 
     @property
     def long_click(self):
