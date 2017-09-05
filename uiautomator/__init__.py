@@ -339,7 +339,9 @@ class AutomatorServer(object):
 
     __apk_files = ["libs/app-uiautomator.apk", "libs/app-uiautomator-test.apk"]
     # Used for check if installed
-    __apk_vercode = 2
+    # 2: fix bug
+    # 3: screenrecord support
+    __apk_vercode = 3
     __apk_pkgname = 'com.github.uiautomator'
     __apk_pkgname_test = 'com.github.uiautomator.test'
 
@@ -399,6 +401,10 @@ class AutomatorServer(object):
                 self.adb.cmd("install", "-r", os.path.join(base_dir, apk)).wait()
         else:
             debug_print("already installed, skip")
+    
+    def uninstall(self):
+        self.adb.cmd("uninstall", self.__apk_pkgname)
+        self.adb.cmd("uninstall", self.__apk_pkgname_test)
 
     @property
     def jsonrpc(self):
@@ -425,7 +431,12 @@ class AutomatorServer(object):
                         raise
                 except JsonRPCError as e:
                     debug_print('rpc error', e.code, e.message)
-                    raise
+                    if 'UiAutomation not connected' in e.message:
+                        self.uninstall()
+                        return _JsonRPCMethod(url, method, timeout, False)(*args, **kwargs)
+                    else:
+                    # if e.message
+                        raise
                     # if e.code >= error_code_base - 1:
                     #     server.stop()
                     #     server.start(timeout=10)
@@ -473,7 +484,7 @@ class AutomatorServer(object):
         debug_print('manufacturer', self.ro_manufacturer())
         if self.sdk_version() >= 18:
             self.install()
-            cmd = ["shell", "am", "instrument", "-w",
+            cmd = ["shell", "am", "instrument", "-w", "-r",
                     "-e", "debug", "false", 
                     "-e", "class", "com.github.uiautomator.stub.Stub",
                     "com.github.uiautomator.test/android.support.test.runner.AndroidJUnitRunner"]
@@ -495,7 +506,7 @@ class AutomatorServer(object):
             debug_print('poll', self.uiautomator_process.poll())
             if self.uiautomator_process.poll() is not None:
                 stdout = self.uiautomator_process.stdout.read()
-                raise IOError("uiautomator start failed: " + stdout)
+                raise IOError("uiautomator start failed: " + str(stdout))
         if not self.alive:
             raise IOError("RPC server not started!")
 

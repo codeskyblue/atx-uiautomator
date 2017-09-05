@@ -146,8 +146,8 @@ class Adb(object):
     def forward_list(self):
         '''adb forward --list'''
         version = self.version()
-        if int(version[1]) <= 1 and int(version[2]) <= 0 and int(version[3]) < 31:
-            raise EnvironmentError("Low adb version.")
+        if int(version[1]) <= 1 and int(version[2]) <= 0 and int(version[3]) < 32:
+            raise EnvironmentError("Low adb version. need adb >= 1.0.32")
         lines = self.raw_cmd("forward", "--list").communicate()[0].decode("utf-8").strip().splitlines()
         return [line.strip().split() for line in lines]
 
